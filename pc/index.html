@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ameba Pro2 Local WebRTC Example</title>
+  <style>
+    body {font: 15px/1.5 system-ui, sans-serif; max-width: 1000px; margin: 25px auto; padding: 0 14px; background: #141821; color:#e8edf7;}
+    h1{font-size:1.5rem} .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:15px 0}
+    button{padding:10px 18px;border:0;border-radius:7px;cursor:pointer} button:disabled{opacity:.45;cursor:default}
+    video{width:100%;background:#000;aspect-ratio:16/9;object-fit:contain;border-radius:10px}
+    pre{padding:14px;background:#232b3c;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+    .muted{color:#a8b4c8} strong{color:#93dbff}
+  </style>
+</head>
+<body>
+<h1>Ameba Pro2 Local WebRTC Example</h1>
+<p class="muted">Local signaling runs on this PC. Media flows directly from AMB82 Mini to Firefox over UDP.</p>
+<div class="controls"><span id="status">Connecting to local signaling…</span><button id="start" disabled>Connect video</button><button id="stop" disabled>Stop</button></div>
+<video id="video" autoplay playsinline controls muted></video>
+<p>ICE: <strong id="ice">—</strong> · Peer: <strong id="peer">—</strong></p>
+<p class="muted">Video RTP: <strong id="stats">Waiting for connection…</strong></p>
+<pre id="log"></pre>
+<script>
+'use strict';
+const ui = Object.fromEntries(['status','start','stop','video','ice','peer','stats','log'].map(id=>[id,document.getElementById(id)]));
+const log = (...args) => { ui.log.textContent += `${new Date().toLocaleTimeString()} ${args.join(' ')}\n`; ui.log.scrollTop=ui.log.scrollHeight; };
+let socket, pc, cameraOnline=false, pendingCandidates=[];
+const send = (type,payload) => {
+  if (socket?.readyState !== WebSocket.OPEN) {log('WS is disconnected');return;}
+  socket.send(JSON.stringify({type,payload}));
+};
+function cleanPeer(notify=true){
+  if (notify && pc) send('bye',null);
+  if (pc) {pc.onicecandidate=null;pc.close();pc=null;}
+  pendingCandidates=[]; ui.video.srcObject=null; ui.ice.textContent='—';ui.peer.textContent='—';ui.stats.textContent='Waiting for connection…';
+  ui.stop.disabled=true; ui.start.disabled=!cameraOnline;
+}
+function connectSignal(){
+  socket=new WebSocket(`ws://${location.host}/signal`);
+  socket.onopen=()=>{ socket.send(JSON.stringify({type:'hello',role:'viewer'}));log('signaling websocket connected'); };
+  socket.onclose=()=>{cameraOnline=false;cleanPeer(false);ui.status.textContent='Signaling disconnected';log('signaling websocket disconnected');};
+  socket.onerror=()=>log('signaling websocket error');
+  socket.onmessage=async ({data})=>{
+    let m;try{m=JSON.parse(data);}catch{return;}
+    if(m.type==='status') {cameraOnline=!!m.camera;ui.status.textContent=cameraOnline?'AMB82 signaling connected':'Waiting for AMB82 Mini';ui.start.disabled=!cameraOnline||!!pc;return;}
+    if(m.type==='error'){log('error:',m.message);return;}
+    if(m.type==='bye'){log('camera disconnected / session ended');cleanPeer(false);return;}
+    if(m.type==='answer') {
+      if(!pc){log('unexpected answer');return;}
+      try{
+        const answer=typeof m.payload==='string'?JSON.parse(m.payload):m.payload;
+        await pc.setRemoteDescription({type:'answer',sdp:answer.sdp});
+        for(const c of pendingCandidates) await pc.addIceCandidate(c);
+        pendingCandidates=[];log('SDP answer applied');
+      }catch(e){log('answer error:',e.message);} return;
+    }
+    if(m.type==='candidate'){
+      try{
+        const c=typeof m.payload==='string'?JSON.parse(m.payload):m.payload;
+        if(!pc){log('candidate without peer');return;}
+        if(!pc.remoteDescription)pendingCandidates.push(c);
+        else await pc.addIceCandidate(c);
+      }catch(e){log('candidate error:',e.message);} return;
+    }
+    log('unhandled message:',m.type);
+  };
+}
+ui.start.onclick=async()=>{
+  cleanPeer(false);
+  pc=new RTCPeerConnection({iceServers:[],iceCandidatePoolSize:0});
+  pc.oniceconnectionstatechange=()=>{ui.ice.textContent=pc?.iceConnectionState??'—';log('ice:',ui.ice.textContent);};
+  pc.onconnectionstatechange=()=>{ui.peer.textContent=pc?.connectionState??'—';log('peer:',ui.peer.textContent);};
+  pc.onicecandidate=({candidate})=>{if(candidate)send('candidate',candidate.toJSON());};
+  pc.ontrack=({track})=>{
+    log('track:',track.kind);
+    let stream=ui.video.srcObject;
+    if(!stream){stream=new MediaStream();ui.video.srcObject=stream;}
+    if(!stream.getTracks().some(t=>t.id===track.id))stream.addTrack(track);
+    track.onmute=()=>log('track muted:',track.kind);
+    track.onunmute=()=>{log('track unmuted:',track.kind); if(track.kind==='video' && ui.video.paused)ui.video.play().catch(e=>log('play:',e.message));};
+    if(track.kind==='video')ui.video.play().catch(e=>log('play:',e.message));
+  };
+  const v=pc.addTransceiver('video',{direction:'recvonly'});
+  const codecs=RTCRtpReceiver.getCapabilities?.('video')?.codecs?.filter(c=>c.mimeType.toLowerCase()==='video/h264')||[];
+  if(codecs.length && v.setCodecPreferences) v.setCodecPreferences(codecs);
+  // Realtek demo adds audio as well; accept it but keep playback muted for laboratory testing.
+  pc.addTransceiver('audio',{direction:'recvonly'});
+  ui.start.disabled=true;ui.stop.disabled=false;
+  try{const offer=await pc.createOffer();await pc.setLocalDescription(offer);send('offer',{type:'offer',sdp:pc.localDescription.sdp});log('SDP offer sent; waiting for AMB82 answer');}
+  catch(e){log('offer error:',e.message);cleanPeer(false);}
+};
+async function updateStats(){
+  if(!pc){ui.stats.textContent='Waiting for connection…';return;}
+  const report=await pc.getStats();
+  const v=[...report.values()].filter(r=>r.type==='inbound-rtp' && !r.isRemote && (r.kind==='video'||r.mediaType==='video'));
+  const track=ui.video.srcObject?.getVideoTracks()[0];
+  const state=`track=${track ? (track.muted?'muted':'unmuted') : 'none'}, readyState=${ui.video.readyState}, paused=${ui.video.paused}`;
+  if(!v.length){ui.stats.textContent='no inbound RTP; '+state;return;}
+  const r=v[0];
+  const f=(name)=>r[name]===undefined?'—':String(r[name]);
+  ui.stats.textContent=`packets=${f('packetsReceived')} · bytes=${f('bytesReceived')} · framesReceived=${f('framesReceived')} · framesDecoded=${f('framesDecoded')} · keyFramesDecoded=${f('keyFramesDecoded')} · ${state}`;
+}
+setInterval(()=>{updateStats().catch(e=>log('stats error:',e.message));},2000);
+ui.stop.onclick=()=>cleanPeer();
+connectSignal();
+</script>
+</body>
+</html>

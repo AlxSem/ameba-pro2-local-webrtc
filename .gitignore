@@ -1,0 +1,16 @@
+node_modules/
+*.log
+*.bin
+*.elf
+*.axf
+*.ntz
+*.map
+*.bak
+*.pem
+*.key
+.env
+build*/
+CMakeFiles/
+.DS_Store
+__pycache__/
+*.pyc

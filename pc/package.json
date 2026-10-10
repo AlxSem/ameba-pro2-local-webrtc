@@ -1,0 +1,13 @@
+{
+  "name": "ameba-local-webrtc-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LAN signaling relay for AMB82 Mini and a Firefox WebRTC viewer",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_camera_payload.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
